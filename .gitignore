@@ -7,6 +7,8 @@ __pycache__/
 
 *.db
 
+.ssh/
+
 node_modules/
 
 python-installer.exe
