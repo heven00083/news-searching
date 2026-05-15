@@ -1,7 +1,6 @@
 import streamlit as st
 import sqlite3
 from pathlib import Path
-from typing import Iterable
 
 
 DB_PATH = Path(__file__).with_name("trend_catcher.db")
@@ -54,12 +53,13 @@ def list_categories(conn: sqlite3.Connection) -> list[tuple[int, str]]:
     return [(int(r[0]), str(r[1])) for r in rows]
 
 
-def create_category(conn: sqlite3.Connection, name: str) -> None:
+def create_category(conn: sqlite3.Connection, name: str) -> int:
     cleaned = name.strip()
     if not cleaned:
         raise ValueError("分类名不能为空")
-    conn.execute("INSERT INTO categories (name) VALUES (?);", (cleaned,))
+    cur = conn.execute("INSERT INTO categories (name) VALUES (?);", (cleaned,))
     conn.commit()
+    return int(cur.lastrowid)
 
 
 def delete_category(conn: sqlite3.Connection, category_id: int) -> None:
@@ -91,28 +91,8 @@ def delete_keyword(conn: sqlite3.Connection, keyword_id: int) -> None:
     conn.commit()
 
 
-def category_picker(
-    *,
-    categories: Iterable[tuple[int, str]],
-    selected_category_id: int | None,
-) -> tuple[int | None, list[str]]:
-    ids: list[int] = []
-    names: list[str] = []
-    for cid, cname in categories:
-        ids.append(cid)
-        names.append(cname)
-
-    if not ids:
-        return None, []
-
-    if selected_category_id in ids:
-        index = ids.index(selected_category_id)
-    else:
-        index = 0
-
-    chosen_name = st.selectbox("当前分类", names, index=index)
-    chosen_id = ids[names.index(chosen_name)]
-    return chosen_id, names
+def first_category_id(categories: list[tuple[int, str]]) -> int | None:
+    return categories[0][0] if categories else None
 
 
 def main() -> None:
@@ -123,69 +103,101 @@ def main() -> None:
     conn = get_connection()
     init_db(conn)
 
-    st.sidebar.header("配置")
-
     categories = list_categories(conn)
     selected_category_id = st.session_state.get("selected_category_id")
-    chosen_id, _names = category_picker(
-        categories=categories,
-        selected_category_id=selected_category_id,
-    )
-    st.session_state["selected_category_id"] = chosen_id
+    if selected_category_id is None:
+        selected_category_id = first_category_id(categories)
+        st.session_state["selected_category_id"] = selected_category_id
 
-    with st.sidebar.form("create_category_form"):
-        new_name = st.text_input("新建分类", placeholder="例如：涉华负面、签证政策、旅游口碑")
-        submitted = st.form_submit_button("创建")
-        if submitted:
+    st.sidebar.header("分类与关键词")
+
+    with st.sidebar.expander("➕ 新建分类", expanded=False):
+        st.caption("分类名称")
+        new_category_name = st.text_input(
+            "分类名称",
+            placeholder="例如：涉华负面、签证政策、旅游口碑",
+            key="new_category_name",
+            label_visibility="collapsed",
+        )
+        if st.button("创建分类", key="create_category_btn"):
             try:
-                create_category(conn, new_name)
-                st.success("已创建分类")
-                st.session_state["selected_category_id"] = None
+                new_id = create_category(conn, new_category_name)
+                st.session_state["selected_category_id"] = new_id
+                st.session_state["new_category_name"] = ""
                 st.rerun()
             except sqlite3.IntegrityError:
                 st.error("分类名已存在")
             except ValueError as e:
                 st.error(str(e))
 
-    if chosen_id is not None:
-        st.sidebar.divider()
-        st.sidebar.subheader("关键词")
-
-        with st.sidebar.form("add_keyword_form"):
-            new_kw = st.text_input("添加关键词", placeholder="例如：China travel")
-            kw_submitted = st.form_submit_button("添加")
-            if kw_submitted:
-                try:
-                    add_keyword(conn, chosen_id, new_kw)
-                    st.success("已添加关键词")
-                    st.rerun()
-                except ValueError as e:
-                    st.error(str(e))
-
-        kws = list_keywords(conn, chosen_id)
-        if not kws:
-            st.sidebar.caption("当前分类还没有关键词。")
-        else:
-            for kw_id, kw in kws:
-                col1, col2 = st.sidebar.columns([0.78, 0.22])
-                with col1:
-                    st.write(kw)
-                with col2:
-                    if st.button("删除", key=f"del_kw_{kw_id}"):
-                        delete_keyword(conn, kw_id)
+    if not categories:
+        st.sidebar.info("还没有分类。请先创建一个分类。")
+    else:
+        for category_id, category_name in categories:
+            is_selected = category_id == st.session_state.get("selected_category_id")
+            with st.sidebar.expander(
+                f"📁 {category_name}",
+                expanded=is_selected,
+            ):
+                top_col1, top_col2 = st.columns([0.62, 0.38])
+                with top_col1:
+                    if is_selected:
+                        st.caption("当前分类")
+                    else:
+                        st.caption(" ")
+                with top_col2:
+                    if st.button("设为当前", key=f"select_cat_{category_id}"):
+                        st.session_state["selected_category_id"] = category_id
                         st.rerun()
 
-        st.sidebar.divider()
-        danger = st.sidebar.checkbox("我确认要删除该分类")
-        if st.sidebar.button("删除当前分类", disabled=not danger):
-            delete_category(conn, chosen_id)
-            st.session_state["selected_category_id"] = None
-            st.rerun()
+                st.caption("关键词")
+
+                kw_input_key = f"kw_input_{category_id}"
+                kw_cols = st.columns([0.72, 0.28])
+                with kw_cols[0]:
+                    st.text_input(
+                        "添加关键词",
+                        placeholder="例如：China travel",
+                        key=kw_input_key,
+                        label_visibility="collapsed",
+                    )
+                with kw_cols[1]:
+                    if st.button("添加", key=f"add_kw_btn_{category_id}"):
+                        try:
+                            add_keyword(conn, category_id, st.session_state.get(kw_input_key, ""))
+                            st.session_state[kw_input_key] = ""
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+
+                kws = list_keywords(conn, category_id)
+                if not kws:
+                    st.caption("暂无关键词")
+                else:
+                    for kw_id, kw in kws:
+                        row_col1, row_col2 = st.columns([0.78, 0.22])
+                        with row_col1:
+                            st.write(kw)
+                        with row_col2:
+                            if st.button("删除", key=f"del_kw_{kw_id}"):
+                                delete_keyword(conn, kw_id)
+                                st.rerun()
+
+                st.divider()
+                danger_key = f"danger_del_cat_{category_id}"
+                danger = st.checkbox("我确认要删除该分类", key=danger_key)
+                if st.button("删除分类", key=f"del_cat_btn_{category_id}", disabled=not danger):
+                    delete_category(conn, category_id)
+                    updated = list_categories(conn)
+                    st.session_state["selected_category_id"] = first_category_id(updated)
+                    st.session_state[danger_key] = False
+                    st.rerun()
 
     left, right = st.columns([0.55, 0.45], gap="large")
 
     with left:
         st.subheader("当前分类")
+        chosen_id = st.session_state.get("selected_category_id")
         if chosen_id is None:
             st.warning("还没有分类。请先在左侧创建一个分类。")
         else:
